@@ -1,0 +1,123 @@
+import pandas as pd
+import numpy as np
+import ta
+import requests
+from datetime import datetime
+
+# Optimized parameters
+PARAMS = {
+    'volume_threshold': 0.4,
+    'strong_volume': 0.8,
+    'rsi_buy': 36,
+    'rsi_sell': 53,
+    'wick_ratio': 1.8,
+    'max_wick_ratio': 0.2
+}
+
+def get_binance_data(symbol='BTCUSDT', interval='1d', days=90):
+    """Fetch data from Binance API"""
+    url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={days}'
+    try:
+        r = requests.get(url)
+        data = r.json()
+        df = pd.DataFrame(data, columns=[
+            'OpenTime','Open','High','Low','Close','Volume',
+            'CloseTime','QuoteAssetVolume','NumberOfTrades',
+            'TakerBuyBaseAssetVolume','TakerBuyQuoteAssetVolume','Ignore'
+        ])
+        
+        # Type conversion
+        for col in ['Open','High','Low','Close','QuoteAssetVolume']:
+            df[col] = df[col].astype(float)
+            
+        df['DateTime'] = pd.to_datetime(df['OpenTime'], unit='ms')
+        return df[['DateTime','Open','High','Low','Close','QuoteAssetVolume']]
+    
+    except Exception as e:
+        print(f"API Error: {e}")
+        return pd.DataFrame()
+
+def detect_candle_pattern(row):
+    """Precise candle pattern detection with color verification"""
+    try:
+        body = abs(row['Close'] - row['Open'])
+        upper_wick = row['High'] - max(row['Open'], row['Close'])
+        lower_wick = min(row['Open'], row['Close']) - row['Low']
+        
+        # Bullish hammer (green candle)
+        if (lower_wick >= PARAMS['wick_ratio'] * body and 
+            upper_wick <= PARAMS['max_wick_ratio'] * body and 
+            row['Close'] > row['Open']):
+            return "Hammer"
+            
+        # Bearish inverted hammer (red candle) - CORRECTION HERE
+        elif (upper_wick >= PARAMS['wick_ratio'] * body and 
+              lower_wick <= PARAMS['max_wick_ratio'] * body and 
+              row['Close'] < row['Open']):  # Crucial validation added
+            return "Inverted_Hammer"
+            
+        return "Neutral"
+    except:
+        return "Error"
+
+def generate_signal(row):
+    """Signal generation with priority to candle patterns"""
+    # 1. Volume filter
+    if row['Ratio_Volume'] < PARAMS['volume_threshold']:
+        return "Neutral (Low Volume)"
+    
+    # 2. Exceptional signals (candle patterns)
+    if row['Candle_Pattern'] == "Hammer" and row['MACD'] > row['MACD_Signal'] and row['RSI_14'] < PARAMS['rsi_buy']:
+        return "Exceptional Buy"
+        
+    # CORRECTION: Specific rule for inverted hammer
+    if row['Candle_Pattern'] == "Inverted_Hammer" and row['MACD'] < row['MACD_Signal'] and row['RSI_14'] > PARAMS['rsi_sell']:
+        return "Exceptional Sell"
+    
+    # 3. Standard signals
+    if row['MACD'] < row['MACD_Signal'] and row['RSI_14'] < PARAMS['rsi_sell']:
+        return "Strong Sell" if row['Ratio_Volume'] > PARAMS['strong_volume'] else "Medium Sell"
+        
+    if row['MACD'] > row['MACD_Signal'] and row['RSI_14'] > PARAMS['rsi_buy'] and row['SMA_7'] > row['SMA_14']:
+        return "Strong Buy" if row['Ratio_Volume'] > PARAMS['strong_volume'] else "Medium Buy"
+    
+    return "Neutral"
+
+def main():
+    print("=== OPTIMIZED BTC STRATEGY ===")
+    print(f"Parameters: {PARAMS}\n")
+    
+    # 1. Load data
+    df = get_binance_data(days=90)
+    if df.empty:
+        print("Error: No data retrieved")
+        return
+
+    # 2. Calculate indicators
+    df['SMA_7'] = df['Close'].rolling(7).mean()
+    df['SMA_14'] = df['Close'].rolling(14).mean()
+    df['Volume_MA14'] = df['QuoteAssetVolume'].rolling(14).mean()
+    df['Ratio_Volume'] = df['QuoteAssetVolume'] / df['Volume_MA14']
+    df['RSI_14'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()
+    
+    # MACD
+    macd = ta.trend.MACD(df['Close'])
+    df['MACD'] = macd.macd()
+    df['MACD_Signal'] = macd.macd_signal()
+    
+    # 3. Signal detection
+    df['Candle_Pattern'] = df.apply(detect_candle_pattern, axis=1)
+    df['Signal'] = df.apply(generate_signal, axis=1)
+    
+    # 4. Results
+    print("Latest generated signals:")
+    cols = ['DateTime', 'Close', 'RSI_14', 'MACD', 'MACD_Signal', 'Ratio_Volume', 'Candle_Pattern', 'Signal']
+    print(df[cols].tail(15))
+    
+    # 5. Export
+    filename = f"btc_signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+    df.to_csv(filename, index=False)
+    print(f"\nFile exported: {filename}")
+
+if __name__ == "__main__":
+    main()
